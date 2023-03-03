@@ -1,0 +1,1738 @@
+#!/usr/bin/perl -w
+##===============================================================================
+#     mbox2pdf
+#     Created: Thu 11 Aug 2011 03:25:55 PM EDT
+#     Last Modified: Wed 12 Apr 2017 11:56:03 AM EDT
+#
+#
+#     AUTHOR: Jeremy Johnson
+#     COMPANY: 
+#     Copyright (C) 2011 Jeremy Johnson
+#     REVISION: 1.17 (04/12/2017)
+#
+#     Description: Perl script using hypermail and latex to create
+#                     a hyperlinked pdf of an email mbox
+#
+#     This program is free software; you can redistribute it and/or modify
+#     it under the terms of the GNU General Public License as published by
+#     the Free Software Foundation; either version 2 of the License, or
+#     (at your option) any later version.
+#
+#     This program is distributed in the hope that it will be useful,
+#     but WITHOUT ANY WARRANTY; without even the implied warranty of
+#     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#     GNU General Public License for more details.
+#
+#     You should have received a copy of the GNU General Public License
+#     along with this program; if not, write to the Free Software
+#     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+#
+#        REQS: perl
+#              bash syntax ( for loops, conditionals, etc )
+#                   internal commands: dirname, basename
+#              hypermail-2.2.0 from              <http://www.hypermail-project.org/>
+#              latex           from              <http://www.tug.org/texlive/>
+#              html2ps         from              <http://user.it.uu.se/~jan/html2ps.html>
+#
+#              external utilities: 
+#                   pdfinfo from poppler         <http://poppler.freedesktop.org/>
+#                   qpdf    from qpdf            <http://qpdf.sourceforge.net/>
+#                   ps2pdf  from ghostscript-gpl <http://ghostscript.com/>
+#                   pdftk   from pdftk           <http://www.pdflabs.com/tools/pdftk-the-pdf-toolkit/>
+#                   tr      from coreutils       <http://www.gnu.org/software/coreutils/>
+#                   cut     from coreutils       <http://www.gnu.org/software/coreutils/>
+#                   pdfannotextractor from       <http://www.ctan.org/tex-archive/macros/latex/contrib/pax/>
+#                   libreoffice from             <http://www.libreoffice.org>
+#                   file     from                <ftp://ftp.astron.com/pub/file/>
+#                   gif2png  from                <http://catb.org/~esr/gif2png/>
+#
+#                   pdfopt  from ghostscript-gpl <http://ghostscript.com/>
+#                           no longer required since it's been removed from ghostscript-gpl
+#
+#        URLS: mhonarc   http://www.mhonarc.org/
+#              jhove     http://hul.harvard.edu/jhove/
+#
+#              HTML CHARACTER ENCODING
+#              http://www.utexas.edu/learn/html/spchar.html
+#              http://www.blooberry.com/indexdot/html/topics/urlencoding.htm
+#              http://www.dwheeler.com/essays/quotes-in-html.html
+#
+#              PERL MODULES FOR PARSING HTML
+#              http://perlmeme.org/tutorials/html_parser.html
+#              http://lwp.interglacial.com/ch09_02.htm
+#              http://search.cpan.org/~jfearn/HTML-Tree-4.2/lib/HTML/Element.pm#$h-%3Econtent_refs_list
+#              http://search.cpan.org/~jfearn/HTML-Tree-4.2/lib/HTML/Tree/Scanning.pod
+#              HTML::Tree(Builder) in 6 minutes http://www.perlmonks.org/?node_id=280461
+#              HTML::TokeParser Tutorial        http://www.perlmonks.org/?node_id=99254
+#              Parsing HTML - using HTML::TreeBuilder 
+#                  http://www.webmasterkb.com/Uwe/Forum.aspx/perl/17478/Parsing-HTML-using-HTML-TreeBuilder
+#
+#              HTML::TokeParser;
+#              XML::Simple
+#              Data::Dumper::Concise
+#              HTML::TreeBuilder
+#              Text::Balanced
+#              Scalar::Util
+#              File::Basename
+#
+#              CONVERTING MAILDIR TO MBOX
+#              http://linsec.ca/blog/2010/01/04/converting-maildir-to-mbox-via-mutt/
+#                  $ mutt -f Archive/ -e 'set mbox_type=mbox; set confirmcreate=no; \
+#                  set delete=no; push "T.*<enter>;sarchive<enter><quit>"'
+#              xfmail2mbox.sh http://www.linuxquestions.org/questions/linux-general-1/
+#                     a-script-to-convert-maildir-to-mailbox-format-381568/
+#              Maildir2Mbox.pl http://pascal.nedlinux.nl/perl/Maildir2Mbox.pl
+#
+#              EMAIL ARCHIVING
+#              http://www.junauza.com/2009/11/open-source-email-archiving-software.html
+#              http://archiveopteryx.org/schema
+#              http://www.dbmail.org/
+#              http://www.enkive.org/
+#              http://archivemail.sourceforge.net
+#              
+#        TODO? Maybe for external hyperlinks we should use
+#                 \nolinkurl{URL} instead of \href{URL}{text}
+#              Also, what to do about long links like
+#              https://web1.zixmail.net/s/e?b=some_bank&m=ABDFi3MrBQ9sXdnGdAo1z8Bp&em=email%40domain%2ecom}
+#
+#        TODO: Maybe instead of translating html formatting tokens to their 
+#              latex equivalents, the programs should strip out the formatting 
+#              for these page elements: headnavbar, headaddresses, footnavbar, footnote
+#              Then instead of e.g. print_bodyhead, I would have something like
+#              @addresses = &get_bodyhead(); print_addresses(\@addresses);
+#              This would allow complete control of formatting, e.g. I could change
+#              a itemize list to a table format, etc.
+#
+#        TODO: replace XML::Simple with XML::libXML
+#
+#        BUGS: See list at end of this file
+##===============================================================================
+
+use strict;
+
+use XML::Simple;
+#use XML::LibXML 1.70;
+
+use Data::Dumper::Concise;
+#use base qw(HTML::Parser);
+use HTML::TreeBuilder;
+require HTML::TokeParser;
+use Text::Balanced qw (
+			extract_delimited
+			extract_bracketed
+			extract_quotelike
+			extract_codeblock
+			extract_variable
+			extract_tagged
+			extract_multiple
+
+			gen_delimited_pat
+			gen_extract_tagged
+		       );
+use Scalar::Util 'reftype';
+use diagnostics;
+use File::Basename;
+
+use constant TRUE  => 1;
+use constant FALSE => 0;
+
+my $PDFLATEX = TRUE;
+my $PDFOPT   = TRUE;
+
+
+#die "You must provide a filename to $0 to be parsed as an Excel file" unless @ARGV;
+if($#ARGV!=1){
+   print<<"ENDUSAGE";
+This program converts an mbox email archive into a hyperlinked pdf document.
+Usage: mbox2pdf 2>&1 <Archive.mbox> <OUTDIR> | tee -a <LOGFILE>
+ENDUSAGE
+   exit;
+} 
+
+#START MAIN
+
+my $mbox = $ARGV[0]; unless(-e "$mbox"){print "mbox \"$mbox\" doesn't exist\n"; exit; }
+my $odir = $ARGV[1]; 
+my $cwd  = `pwd`;
+my $texdir = "$odir/tex"; 
+my $texfile = "HyperEmail.tex";
+my $texbase = "HyperEmail";
+
+if(-e "$odir"){print "outdir \"$odir\" already exists\n"; goto XML;}
+
+my $itemopts="noitemsep,parsep=0pt,partopsep=0pt,labelindent=\\parindent,leftmargin=0pt";
+
+
+# hypermail does not have proper unicode support yet
+# Fix character encoding issues (if any)
+
+# BOM Byte Order Marker FEFF
+# my $BOM = decode("utf8", "\x{ef}\x{bb}\x{bf}");
+# my $BOM = chr(0xFEFF);
+# my $BOM = "\x{FEFF}";
+my $BOM = "\x{ef}\x{bb}\x{bf}";
+
+open IFILE, $mbox or die $!;
+open OFILE, ">$mbox.fixed" or die $!;
+while (<IFILE>){ # FIX UNICODE encoding issues
+   #print "LINE" . $_;
+   $_ =~ s/$BOM//g; 
+   $_ =~ s/=EF=BB=BF//g;
+
+   $_ =~ s/\r$//; # Remove Windows carriage returns
+
+   # Fix some odd hex coding issues 
+   # Reserve chars
+   # $ 24
+   # & 26
+   # + 2B
+   # , 2C
+   # / 2F
+   # : 3A
+   # ; 3B
+   # = 3D
+   # ? 3F
+   # @ 40
+
+   #$_ =~ s/^=2D/-/; # Translate =2D to -
+   #$_ =~ s/^=46/F/; # Translate =46 to F
+
+   # TABS
+   $_ =~ s/\t/ /g;      #change to space char
+   $_ =~ s/\xA0/\x20/g; #change to space char
+   $_ =~ s/=A0/ /g; 
+   $_ =~ s/=20$//;      # Remove trailing space
+
+
+   # Translate embedded UTF-8 codes to decimal numeric character reference
+   $_ =~ s/=E2=80=98/&#8216;/g; #UTF-8: E2 80 98 LEFT  SINGLE QUOTATION MARK &lsquo;
+   $_ =~ s/=E2=80=99/&#8217;/g; #UTF-8: E2 80 99 RIGHT SINGLE QUOTATION MARK &rsquo;
+   $_ =~ s/=92/&#8217;/g;       #apostrophe
+   $_ =~ s/=E2=80=9C/&#8220;/g; #UTF-8: E2 80 9C LEFT  DOUBLE QUOTATION MARK &ldquo;
+   $_ =~ s/=E2=80=9D/&#8221;/g; #UTF-8: E2 80 9D RIGHT DOUBLE QUOTATION MARK &rdquo;
+   $_ =~ s/=95/&#8226;/g;       #BULLET (dec)8226 0x2022
+   
+   # German Ulauts
+   $_ =~ s/=FC/&uuml;/g; 
+   $_ =~ s/=F6/&ouml;/g; 
+
+
+
+   #print "FIXED" . $_;
+   print OFILE $_;
+}  close (IFILE); close (OFILE);
+
+#$mbox="$mbox.fixed";
+my $cmd="mv $mbox $mbox.orig";
+system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+$cmd="mv $mbox.fixed $mbox";
+system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+#exit;
+
+
+$cmd="hypermail -d $odir -p -X -m $mbox";
+print "Running \"$cmd\"\n";
+system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+
+$cmd="html2ps -Wb -O -t -U  $odir/index.html  > $odir/Email.ps"; 
+print "Running \"$cmd\"\n";
+system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+
+$cmd="ps2pdf $odir/Email.ps $odir/Email.pdf";
+print "Running \"$cmd\"\nWARNING: This can take awhile\n";
+system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+
+$cmd="rm $odir/Email.ps";
+system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+
+
+XML:
+
+if (-e "$odir/tex/TEXSOURCE.done") {goto PDFLATEX;}
+
+
+print "Tranlating from html to latex\n";
+# Check that archive_overview.haof exists
+my $haof="$odir/archive_overview.haof"; unless(-e "$haof"){print "\"$haof\" doesn't exist\n"; exit; }
+
+&fix_xml($odir, $haof);
+
+# create object
+my $xml = XML::Simple->new();
+#my $xml = XML::LibXML->new();
+
+# read XML file
+#my $data = $xml->XMLin($haof, forcearray=>1, KeyAttr=>{'indices'});
+my $data = $xml->XMLin($haof . ".fix"); #print Dumper($data);
+
+#my $data = XML::LibXML->load_xml(location => $haof);
+#my $data = $xml->parse_file( $haof . ".fix" );
+
+my (@indices, $index);
+foreach my $key (keys (%{$data->{indices}})){
+   $index=$data->{indices}->{$key}; #print "$index\n";
+   if($index eq "index.html"){
+      unshift @indices, $index; #add index to start of the array
+   }else{
+      push (@indices, $index) if ($index ne "index.html");
+   }
+}  
+if(FALSE){ foreach (@indices){ print "$_\n"; } }
+
+# Print Mail Messages
+my $arraymail=$data->{mails}->{mail}; 
+# print "reftype $data->{mails}->{mail}\n"; 
+#foreach my $hashmail (@$arraymail){
+#   foreach my $key (sort keys (%{$hashmail})){
+#      print "$key $hashmail->{$key}\n";
+#   }  print "\n";
+#}
+
+#print "SORTED\n";
+   my @sorted = sort { $$a{'file'} cmp $$b{'file'} } @$arraymail;
+if(FALSE){
+   foreach my $hashmail (@sorted){
+      foreach my $key (sort keys (%{$hashmail})){
+         print "$key $hashmail->{$key}\n";
+      }  print "\n";
+   }
+}
+
+   #my $texdir = "$odir/tex";
+   $cmd="mkdir -p $texdir"; 
+   system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+
+   $cmd="ln -sf .. $odir/tex/ATTDIR"; # Path from TEXDIR to Parent folder of attachments att-????
+   system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+   $cmd="ln -sf . $odir/tex/TEXDIR"; # Path from pdflatex's cwd to HyperEmail.tex
+   system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+
+
+   #open(TEXFILE, ">$preamble") or die("Error: Coudn\'t open $preamble\n");
+   $texfile = "preamble.tex";
+   if(!open(TEXFILE, ">$texdir/$texfile")){
+      die("Error: Coudn\'t open $texdir/$texfile\n");
+   }else{
+      &print_preamble();
+      close(TEXFILE);
+   }
+   $texfile = "HyperEmail.tex";
+   if(!open(TEXFILE, ">$texdir/$texfile")){
+      die("Error: Coudn\'t open $texdir/$texfile\n");
+   }else{
+      &print_texfile();
+      close(TEXFILE);
+   }
+   $texfile = "INPUTS.tex";
+   if(!open(TEXFILE, ">$texdir/$texfile")){
+      die("Error: Coudn\'t open $texdir/$texfile\n");
+   }
+
+   #\phantomsection \section{TITLE} \secttoc \newpage
+   #\phantomsection \addcontentsline{toc}{section}{TITLE}
+   #\phantomsection \addcontentsline{secttoc}{section}{TITLE}
+
+   
+   #print TEXFILE "\\newpage \\section{Indices}\n";
+   print TEXFILE "\\newpage\n";
+   &print_indices();
+
+   #print TEXFILE "\\newpage \\section{Messages}\n";
+   print TEXFILE "\\newpage\n";
+   &print_mail_messages();
+
+   #print TEXFILE '\end{document}' . "\n";
+   close(TEXFILE);
+
+   $cmd = "touch $texdir/TEXSOURCE.done";
+   system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+
+   PDFLATEX:
+   $texfile = "HyperEmail.tex";
+   if($PDFLATEX){ # Run pdflatex on email.tex
+      print "\n\n\nTYPESETTING with pdflatex\n\n";
+
+      # Change to texdir
+      chdir($texdir) or die "Can't chdir to $texdir $!";
+      $cmd = "pwd"; system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+      
+      # Run pdflatex
+      print "\$texdir=$texdir\n\$texfile=$texfile\n\n";
+      $cmd = "for((i=0; i<3; i++)) do pdflatex --shell-escape $texfile; done"; 
+      system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+
+      print "Finished creating pdf with latex\n\n";
+      # Change back to original directory
+      chdir("../../") or die "Can't chdir to $cwd $!";
+      $cmd = "pwd";  system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+
+      $cmd = "mv $texdir/$texbase.pdf $odir/ "; 
+      system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+
+      print "Executing pdfannotextractor on $odir/$texbase.pdf\n";
+      $cmd = "pdfannotextractor $odir/$texbase.pdf"; 
+      system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+
+      if(!$PDFOPT){
+         print "WARNING: Skipping pdf optimization of $texbase.pdf " .
+	       "because one or more pdf attachments could not be optimized\n";
+      }else{
+         print "Calling fixpdf($odir/$texbase.pdf)\n";
+         &fixpdf("$odir/$texbase.pdf");
+      }
+   }
+#END MAIN
+
+sub print_preamble()
+{
+   print TEXFILE <<'ENDPREAMBLE';
+\documentclass[pdftex,11pt,letterpaper]{article}
+\usepackage{fullpage}
+\usepackage[top=0.75in,bottom=0.75in,left=0.75in,right=0.75in]{geometry}
+\usepackage[final]{pdfpages}
+\usepackage{pax} %needs pdfbox and pdfannotextractor
+%\usepackage{draftwatermark} \SetWatermarkScale{6} \SetWatermarkLightness{.5}
+%\usepackage{times}
+\usepackage[T1]{fontenc}
+\usepackage{ae}
+\usepackage{textcomp}
+\usepackage[nice]{nicefrac}
+\usepackage{pifont}
+\usepackage{bbding}
+%\usepackage{marvosym}
+\newcommand{\myarrow}{\ding{234}}
+\usepackage{multicol}
+%\usepackage[toc]{multitoc}
+\usepackage{verbatim}
+\usepackage[normalem]{ulem}
+\usepackage{soul}
+\usepackage[shortlabels]{enumitem}
+\usepackage{xspace}
+%\usepackage{paralist}
+\usepackage{textcase}
+\usepackage{titlesec}
+
+\usepackage[russian,german,spanish,english]{babel} %last languaguage is default
+%\usepackage[latin1]{inputenc} %input encoding                                 
+\usepackage[utf8]{inputenc} %input encoding                                    
+\usepackage[T1]{fontenc} %Use newer font encoding (OT1 is for english-only)    
+% instead of \usepackage[T1]{fontenc}                                          
+%\usepackage{ae,aecompl} %almost european: To use the CM and EC fonts (usually recommended)
+%                                                                                          
+%% FONTS (Pick One if you want)                                                            
+%                                                                                          
+%                                                                                          
+%\usepackage{times} %rm=times-roman, tt=courier, sf=helvetica                              
+%\usepackage{pslatex}   %To use standard postscript fonts                                  
+%%\usepackage{antiqua}                                                                     
+%\usepackage{antpolt}                                                                      
+%\usepackage[math]{anttor}                                                                 
+%\usepackage[condensed,math]{anttor}                                                       
+%\usepackage[light,math]{anttor}                                                           
+%\usepackage[light,condensed,math]{anttor}                                                 
+\usepackage{pbsi}                                                                          
+%\usepackage{bera}                                                                         
+%\usepackage[scaled]{beraserif}                                                            
+%\usepackage[sc]{mathpazo} \linespread{1.05}                                               
+%\usepackage{bookman}                                                                      
+%\usepackage{calligra}                                                                     
+%\renewcommand*\rmdefault{dayrom}                                                          
+%\usepackage{kmath,kerkis}                                                                 
+%\usepackage{literat}                                                                      
+%\usepackage{aurical}                                                                      
+%\renewcommand*\ttdefault{txtt} \renewcommand*\familydefault{\ttdefault}                   
+%\usepackage{mathptmx}                                                                     
+%\renewcommand*\sfdefault{ugq}                                                             
+%\usepackage[urw-garamond]{mathdesign}                                                     
+%\usepackage{times}                                                                        
+%\usepackage{tgadventor}                                                                   
+%\usepackage{tgbonum}                                                                      
+%\usepackage{tgchorus}                                                                     
+%\usepackage{tgcursor}                                                                     
+%\usepackage{tgheros}                                                                      
+%\usepackage{tgpagella}                                                                    
+%\usepackage{tgtermes}                                                                     
+%\usepackage{tgschola}                                                                      
+%\usepackage{fourier}                                                                      
+%\usepackage{gfsbodoni}                                                                    
+%\usepackage{gfsdidot}                                                                     
+%\usepackage{kpfonts}                                                                      
+%\usepackage{uncial}                                                                       
+%\usepackage{libertine}                                                                    
+%\usepackage{chancery}                                                                     
+%%\usepackage{venturis}                                                                    
+%%\usepackage{venturis2}                                                                   
+%%\usepackage{venturisold}                                                                 
+%missing                                                                                   
+%%\usepackage{pandora} %\pnrmfamily                                                        
+%%\usepackage{emerald} %\ECFTallPaul                                                       
+%                                                                                          
+%\input Elzevier.fd \newcommand*\elzevier{\usefont{U}{Elzevier}{xl}{n}}                    
+%\input Eileen.fd   \newcommand*\Eileen{\usefont{U}{Eileen}{xl}{n}}                          
+%\input EileenBl.fd \newcommand*\EileenBl{\usefont{U}{EileenBl}{xl}{n}}                    
+%\input Eichenla.fd \newcommand*\Eichenla{\usefont{U}{Eichenla}{xl}{n}}                    
+%\input Konanur.fd  \newcommand*\Konanur{\usefont{U}{Konanur}{xl}{n}}                       
+%\font\sueterlin=suet14  %% TeX font call! Not LaTeX!!
+
+% disables chapter, section and subsection numbering
+\setcounter{secnumdepth}{-1}
+
+%\usepackage[dvips]{graphicx} % use this when importing ps- and eps-files
+%\usepackage[pdftex]{graphicx} % use this when importing PDF files
+
+\def\First{\texorpdfstring{1\textsuperscript{st}}{First}}
+\def\Second{\texorpdfstring{2\textsuperscript{nd}}{Second}}
+\def\Third{\texorpdfstring{3\textsuperscript{rd}}{Third}}
+\def\Fourth{\texorpdfstring{4\textsuperscript{th}}{Fourth}}
+
+
+%     PDFs store this metadata is two places: the Info dictionary and
+%     the XMP (RDF/XML) stream. Pdftk updates only the Info dictionary, 
+%     but newer versions of Acrobat/Reader defer to the XMP stream.
+
+
+% PdfInfo for reading/writing xmp metadata
+% http://www.traction-software.co.uk/servertools/pdfinfo/index.html`
+%
+\usepackage{xmpincl}  % this defines command \includexmp{xmlfile}
+\usepackage{hyperxmp} % don't include <?xpacket begin="﻿"  id="W5M0MpCehiHzreSzNTczkc9d"?>
+                      %               <?xpacket end='w'?>
+
+%\usepackage[a-1b]{pdfx} %[x-1b, a-1b]
+%\Keywords{pdfTeX\sep PDF/X-1a\sep PDF/A-b}
+%\Title{}
+%\Author{}
+%\Org{}
+%\Subject{}
+%\Creator{}
+%\Producer{}
+%\Volume{}
+%\Issue{}
+%\CoverDisplayDate{}
+%\CoverDate{}
+%\Copyright{}
+%\Doi{}
+%\Lastpage{}
+%\Firstpage{}
+%\Journaltitle{}
+%\Journalnumber{}
+%\CreatorTool{}
+%\AuthoritativeDomain{}
+
+% TODO?
+%\usepackage{attachfile2}
+%\usepackage{embedfile}
+
+% The hyperref package makes sure that all references in your
+% document become colored clickable links.
+%\usepackage[colorlinks,hyperindex]{hyperref}
+\usepackage[colorlinks,hyperindex]{attachfile}
+\hypersetup{%
+  pdftitle = {},
+  pdfauthor = {The Law Offices of Anita C. Johnson},
+  pdfsubject = {},
+  pdfkeywords = {},
+  pdfproducer = {pdflatex},
+  pdfcreator = {mbox2pdf},
+  pdflang = {}
+  %,
+  % extra metadata from hyperxmp
+  % pdfauthortitle = {},
+  % pdfcaptionwriter = {},
+  % pdfcopyright = {},
+  % pdflicenseurl = {},
+  % pdfmetadata = {en-US}
+}
+%\includexmp{metadata} % you must write xml file metadata.xmp
+
+%  MetaData
+\ifpdf
+\pdfinfo{
+% /InfoKey (InfoValue)
+}
+\fi
+
+% suppress the ugly colored boxes around the active parts of the
+% text.
+\def\pdfBorderAttrs{/Border [0 0 0] } % No border around Links
+% Some further Color tuning. Use xcolorsel for help with the colors
+%\definecolor{links}{rgb}{0.2116,0.0104,0.7716} % BlueViolet
+%\def\LinkColor{links}
+%\definecolor{anchors}{rgb}{0.5812,0.0665,0.0659} % IndianRed
+%\def\AnchorColor{anchors}
+
+
+%% Control the fonts and formatting used in the table of contents.
+\usepackage[titles]{tocloft}
+%% Aesthetic spacing redefines that look nicer to me than the defaults.
+%\setlength{\cftbeforechapskip}{2ex}
+%\setlength{\cftbeforesecskip}{0.5ex}
+%% Use Helvetica-Narrow Bold for Chapter entries
+%\renewcommand{\cftchapfont}{%
+%  \fontsize{11}{13}\usefont{OT1}{phv}{bc}{n}\selectfont
+%}
+%\newcommand{\cftXleader}{\cftdotfill{\cftXdotsep}}
+%\newcommand*{\l@section}{\@dottedtocline{1}{1.5em}{2.3em}}
+
+%\usepackage{marvosym}
+%\input{/usr/share/acjtemplates/acjletterhead.tex}
+
+
+\title{}
+\author{}
+\date{}
+\pagestyle{empty}
+
+% FONT FAMILIES
+%\unclfamily   
+%\ECFTallPaul  
+%\pnrmfamiy    
+%\calligra     
+%\bsifamily                                                                               
+%\Fontlukas                                                                               
+%\Fontamici                                                                               
+%\elzevier \fontsize{12mm}{12mm}\selectfont
+%
+%\addtolength{\parskip}{\baselineskip}
+
+% These 2 are mutually exclusive
+\usepackage{minitoc}
+%\usepackage{titlesec}
+
+% Suppress paragraph indentation
+\setlength\parindent{0pt}
+
+% 
+\widowpenalty=10000
+\clubpenalty=10000
+\raggedbottom
+\def\condbreak#1{\vskip 0pt plus #1\pagebreak[3]\vskip 0pt plus -#1\relax}
+\usepackage{import}
+ENDPREAMBLE
+   return 1;
+}
+
+sub print_texfile()
+{
+   print TEXFILE <<'ENDPREAMBLE';
+\input{preamble.tex}
+%\documentclass[../../DOC.tex]{subfiles}
+
+\begin{document}
+
+%\include{metadata}
+%\pagestyle{plain}\pagenumbering{roman}
+%\maketitle
+%\newpage
+%\addtocontents{toc}{\protect\begin{multicols}{2}}
+%\dosecttoc \tableofcontents \newpage 
+%\pagestyle{plain} \pagenumbering{arabic}
+%\DeclareGraphicsExtensions{.eps} % use this when importing eps-files
+
+%to put multiple pages on a single sheet:
+%\includepdf[pages=-, noautoscale=true, fitpaper=true, nup=1x2]{z1.pdf}
+%
+%Useful to change \phantomsection from non-printable to printable:
+%\texorpdfstring{original}{alternate}
+
+
+%\attachfile[options]{filename}
+%\textattachfile[options]{filename}{anchor text}
+
+%\phantomsection \addcontentsline{toc}{section}{File Attachments}
+%\begin{center}{\Huge File Attachments}\end{center}
+
+%\attachfilesetup{
+%subject=7 Sunset Village, author=Stacy,
+%size=20, mimetype=application/vnd.oasis.opendocument.text,
+%created=, modified=%,date=
+%}
+
+%\renewcommand{\labelitemi}{}
+%\begin{itemize}
+%\item \attachfile{filename} Description
+%\end{itemize}
+
+\pagestyle{empty}
+\DeclareGraphicsExtensions{.pdf, .jpg, .jpeg, .png, .jbig2} % use this when importing PDF files
+
+\def\TEXDIR{.}  % folder in which pdflatex is run
+\def\ATTDIR{..} % Symlink to Parent folder containing att-???? folders
+
+%\import{INPUTS.tex}
+\subimport{./www/tex/}{INPUTS.tex}
+%\input{INPUTS.tex}
+
+\end{document}
+ENDPREAMBLE
+   return 1;
+}
+
+sub print_indices()
+{
+   my $texfile;
+   #print "ENTERING print_indices()\n";
+   foreach my $htm (@indices){ 
+   #print "Printing Index \"$htm\"\n";
+      $texfile = $htm;
+      $texfile =~ s/.html$/.tex/;
+      print TEXFILE "\\newpage \\phantomsection \\label{$texfile}  \\input{TEXDIR/$texfile}\n";
+      &parse_index($odir, $htm);
+   }
+   #print "EXITING print_indices()\n";
+   return 1;
+}
+sub fix_BOM()
+{
+   my $path = $_[0]; #print "PATH=$path\n";
+   my $html = $_[1]; #print "HTML=$html\n";
+   my $BOM = "\x{ef}\x{bb}\x{bf}";
+
+   open IFILE, "<", "$html" or die $!;
+   open OFILE, ">", "$html.bom" or die $!;
+
+   while (<IFILE>) { 
+      $_ =~ s/$BOM//g;
+      print OFILE $_; 
+   }  close(OFILE);
+
+   close(IFILE);
+
+   my $cmd = "mv $path/$BOM $path/$html";
+   system($cmd);
+   if($? == -1){
+      print "ERROR \"$cmd\" failed with error $!\n"; return 0;
+   }
+   return 1;
+}
+sub fix_xml()
+{
+   my $path = $_[0]; #print "PATH=$path\n";
+   my $xml  = $_[1]; #print "XML=$xml\n";
+   open IFILE, "<", "$xml" or die $!;
+   open OFILE, ">", "$xml.fix" or die $!;
+
+   while (<IFILE>) { 
+      $_ =~ s/&/&#038;/g; #substitute '&' with '&#038;'
+      print OFILE $_; 
+   }  close(OFILE);
+
+   close(IFILE);
+   return 1;
+}
+sub print_mail_messages()
+{
+   my ($htm, $tex);
+
+   foreach my $hashmail (@sorted){
+      #foreach my $key (sort keys (%{$hashmail})){ print "$key $hashmail->{$key}\n"; }
+      #print "FILE: $hashmail->{'file'}\n";
+      $htm = $hashmail->{'file'}; $htm =~ s/^\"//; $htm =~ s/\"$//;
+      $tex = $htm; $tex =~ s/.html$/.tex/;
+      print TEXFILE "\\newpage \\phantomsection \\label{$tex}   \\input{TEXDIR/$tex}\n";
+      #&fix_BOM($odir, $htm);
+      &parse_message($odir, $htm);
+   }
+
+   return 1;
+}
+sub print_attachments()
+{
+   print TEXFILE "\\section{Attachments}\n";
+   return 1;
+}
+sub print_head()
+{
+   my $tree = $_[0];
+   my $file = $_[1];
+   my $texdir = "$odir/tex";
+   my $head=$tree->find_by_tag_name('head');
+
+   open(FILE, ">$texdir/$file") or die("Error opening $texdir/$file\n");
+   print FILE "\\begin{comment}\n";
+   print FILE $head->as_HTML;
+   print FILE "\\end{comment}\n\n";
+   close(FILE);
+}
+sub print_bracket()
+{
+   my $html = $_[0];
+   my $file = $_[1];
+   my $base = $file; $base =~ s/.tex//;
+   my $texdir = "$odir/tex";
+
+   #my $nav    = $navbar->look_down("_tag", "ul");
+   #my $list   = $nav->look_down("_tag", "li"); print "HEADLIST" . $list->as_HTML . "\n\n";
+
+   my @items = extract_multiple($html, [ sub { extract_bracketed($_[0],'[]') } ]);
+   my ($anchor, $url, $text, $node, $sortby);
+   foreach my $item (@items){
+      next if($item =~ m/^\s*$/);
+      $sortby = ($item =~ m/sort by/)? TRUE: FALSE;
+      $anchor = HTML::TreeBuilder->new_from_content($item);
+      $node=$anchor->look_down(
+         sub{ $_[0]->tag() eq 'a' and $url = $_[0]->attr('href') }
+      );
+      if($node){
+         $text = $node->content->[0];
+      }else{
+         $text = $item; if($text =~ /^\[\s*(\w+)\s*\]$/){$text=$1;};
+      }
+      if($url =~ /^\#(.*)/){
+         $url = "$base:$1";
+      }else{
+         $url =~ s/.html/.tex/;
+      }
+      if($sortby){
+         print FILE "\\hyperref[$url]{$text} sort by: \n";
+      }else{
+         if($node){
+            print FILE "[ \\hyperref[$url]{$text} ] \n";
+	 }else{
+            print FILE "[ $text ] \n";
+	 }
+      }
+      $anchor->delete;
+   } #BRACKET
+}
+sub parse_html()
+{
+   my $html = $_[0];
+   my $file = $_[1];
+   my $tex  = $file; $tex =~ s/.html$/.tex/;
+   my @anchors;
+   my $texstr="";
+   my $itemcnt=0;
+   my $tp = HTML::TokeParser->new(\$html) || die "Can't open: $!";
+
+   #print "parse_html: html=$html\n";
+   my $strref=\$texstr;
+   my ($a_type, $a_href, $a_nref, $a_encl); $a_type=""; $a_nref=""; $a_encl="";
+   my $preformat=FALSE;
+   while (my $token = $tp->get_token)
+   {
+      my $ttype = shift @{ $token }; #print "TTYPE=$ttype\n";
+      if($ttype eq "S")    # start tag?
+      {
+        my($tag, $attr, $attrseq, $rawtxt) = @{ $token };
+        #print "TAG <$tag> RAWTXT=$rawtxt\n";
+	if($tag eq "a")
+	{ 
+	   $a_type="";
+	   $strref=\$a_encl;
+	   #print "FOUND ANCHOR: STRREF=$$strref\n";
+	   foreach my $key (keys (%{$attr})){
+	      #print "KEY=$key\n";
+	      if($key eq "href"){
+	           $a_href = $attr->{'href'};
+		   $a_href =~ s/^#/:/;
+	           #my $a_encl = $tp->get_trimmed_text("/$tag");
+		   #$a_encl = &latex_escape($a_encl);
+	           #print "ANCHOR= <a href=$a_href>$a_encl</a>\n";
+	           if( ($a_href =~ m/^http/) ||
+		       ($a_href =~ m/^ftp/)  ){ # external link
+		      $a_type="external";
+		      #print "$a_type $a_href\n";
+	              #$texstr .= "\\href{$a_href}{$a_encl}";
+	           }elsif($a_href =~ /^mailto:/){ # external link
+		      $a_type="external";
+		      $a_href = &latex_escape($a_href);
+	           }elsif($a_href =~ m/#/){ # internal link
+		      if($a_href =~ m/^:/){ # Prepend this filename for internal #links
+		         $a_href = $tex . $a_href;
+		         $a_type="hyperlink";
+		      }else{ #thread.html#15
+		         $a_href =~ s/\.html/.tex/;
+	                 $a_href =~ s/#/:/;
+		         $a_type="hyperlink";
+		      }
+		      #print "$a_type $a_href\n";
+	              #$texstr .= "\\hyperref[$a_href]{$a_encl}";
+	           }else{ #link to filename.html or :start or :options2
+		      $a_type="internal";
+	              $a_href =~ s/#/:/; #change # to :
+	              $a_href =~ s/\.html/.tex/; 
+		      if($a_href =~ m/^:/){
+		         $a_type="hyperlink";
+			 $a_href = $tex . $a_href;
+		      }
+		      #print "INTERNAL: $a_type $a_href\n";
+	              #$texstr .= "\\hyperref[$a_href]{$a_encl}";
+	           }
+	           #print "ANCHOR= <a href=$a_href>$a_encl</a>\n";
+                   #print "KEY=$key ATTR=$a_href\n";
+	        }elsif($key eq "name"){         #print "KEY=$key\n";
+		   if($a_type eq ""){
+                      #print "TAG <$tag> RAWTXT=$rawtxt\n";
+		      $a_type = "named";
+	              $a_nref = $attr->{'name'};   #print "KEY=$key ATTR=$a_nref\n";
+		      #print "NAMED: $a_type $a_nref\n";
+		      #my $hypertarget = "\\hypertarget{$a_nref}{$a_name}";
+		      #$texstr .= $hypertarget;
+		   }
+	        }else{
+	           #print "KEY=$key\n";
+	        }
+	   }
+	   #print "ANCHOR HREF=$a_href\n" if($a_href ne "");
+	   #print "ANCHOR NREF=$a_nref\n" if($a_nref ne "");
+	}elsif($tag eq "em"){ $$strref .= "\\textit{";
+	}elsif( ($tag eq "b") or ($tag eq "dfn") ){  $$strref .= "\\textbf{";
+	}elsif($tag eq "p"){  $$strref .= "\n";
+	}elsif($tag eq "br"){  $$strref .= "\\\\\n";
+	}elsif($tag eq "small"){  $$strref .= "\\small ";
+	}elsif($tag eq "big"){ $$strref .= "\\large ";
+	}elsif($tag eq "ul"){  $$strref .= "\n\\begin{itemize}\n";
+	}elsif($tag eq "ol"){  $$strref .= "\n\\begin{enumerate}\n";
+	}elsif($tag eq "li"){  
+	   if($itemcnt>0){ #reset item counter to 0 because we're missing </li>
+	      $$strref .= "\n";      $itemcnt=0; 
+	   }  $$strref .= "\\item "; $itemcnt++;
+	}elsif($tag eq "pre"){ # Preformatted text
+	   $preformat = TRUE;
+	}elsif($tag eq "img"){
+	   foreach my $key (keys (%{$attr})){ #print "KEY=$key\n";
+	      if($key eq "src"){
+	         $a_href = $attr->{'src'}; $a_href =~ s/^#/:/;
+		 #my $image =`basename $a_href`; $image =~ s/\n$//;
+		 (my $name, my $path, my $suffix) = fileparse("$a_href",qr"\..[^.]*$");
+		       print "GIF2PNG: a_href=$a_href\n";
+		       print "GIF2PNG: path=$path\n";
+		       print "GIF2PNG: name=$name\n";
+		       print "GIF2PNG: suffix=$suffix\n";
+		 if($suffix eq ".gif" ||
+		    $suffix eq "" ){
+		    my $cmd="gif2png -O $odir/$path$name$suffix";
+		       print "GIF2PNG: $cmd\n";
+                    system($cmd);
+                    if($? == -1){
+                       print "ERROR \"$cmd\" failed with error $!\n"; #return 0;
+                    }else{
+		       my $cmd="optipng $odir/$path$name.png";
+                       system($cmd);
+                       if($? == -1){
+                          print "ERROR \"$cmd\" failed with error $!\n"; #return 0;
+		       }
+		       $a_href="$path$name.png";
+		    }
+		 }
+		 $$strref .= "\\label{$a_href}\n";
+	         $$strref .= "\\includegraphics[width=1in]{ATTDIR/$a_href}\n";
+	      }elsif($key eq "alt"){
+	      }
+	   }
+	}
+      } # since we know what we're looking for, no need for the rest of these
+      elsif($ttype eq "T")  {   # text?
+         my($text, $is_data) = @{ $token }; 
+	 if(!$is_data){
+	    $text = &latex_escape($text);
+	    { 
+	       undef $/; 
+	       $text =~ s/^\n//;       # Strip leading newlines
+	       $text =~ s/\n+/\n/g;    # Condense multiple newlines
+	       if($preformat){
+	          $text =~ s/\n/\\\\\n/g; # Convert newlines to latex linebreaks
+	       }
+	    }
+	    $$strref .= $text; #print "RAWTEXT=$text\n";
+	    #print "<PREFORMAT>\n$text</PREFORMAT>\n" if($preformat);
+	  }
+         #print "T TXT=$text\n";
+      }elsif($ttype eq "C") {   # comment?
+         my $text = @{ $token }; #print "COMMENT=$text\n";
+	 #$$strref .= $text; 
+	 #print "C TXT=$text\n";
+      }elsif($ttype eq "E") {   # end tag?
+         my($tag, $text) = @{ $token }; #print "EndTag=$tag  TEXT=$text\n";
+	 if( $tag eq "em" ){ $$strref .= "}"; 
+	 }elsif( ($tag eq "b") or ($tag eq "dfn") ){  $$strref .= "}";
+	 }elsif($tag eq "p"){      $$strref .= "\n";
+	 }elsif($tag eq "br"){     $$strref .= "BREAK\n"; #"\\\\\n";
+	 }elsif($tag eq "img"){    ;
+	 }elsif($tag eq "small"){  $$strref .= "\\normalsize ";
+	 }elsif($tag eq "big"){    $$strref .= "\\normalsize ";
+	 }elsif($tag eq "ul"){     $$strref .= "\n\\end{itemize}\n";
+	 }elsif($tag eq "ol"){     $$strref .= "\n\\end{enumerate}\n";
+	 }elsif($tag eq "li"){     $$strref .= "\n"; $itemcnt--;
+	 }elsif($tag eq "pre"){    $preformat=FALSE;
+	 }elsif($tag eq "a"){ # need to close anchor
+	    #$a_encl = $tp->get_trimmed_text("/a");
+	    #$a_encl = &latex_escape($a_encl);
+	    #print "ATYPE=$a_type ATEXT: $a_encl\n";
+	    #print "ANCHOR TEXT=$$strref\n";
+	    if($a_type ne ""){ #print "ATYPE=$a_type\n";
+	       if($a_type     eq "external"){ 
+	          $texstr .= "\\href{$a_href}{$a_encl}";        
+	       }elsif($a_type eq "internal"){
+	          my $internal_link = "\\hyperref[$a_href]{$a_encl}";    
+		  #print "INTERNAL LINK: $internal_link\n";
+		  if($a_href =~ m/^:/){ 
+		     $internal_link = "\\hyperlink{$tex$a_href}{$a_encl}";    
+		     #print "INTERNAL HREF: $a_href\n";
+		     #print "INTERNAL LINK: $internal_link\n";
+		  }else{ 
+		     $internal_link = "\\hyperref[$a_href]{$a_encl}";    
+		  }
+		  #print "INTERNAL LINK2: $internal_link\n";
+	          $texstr .= $internal_link;
+	       }elsif($a_type eq "hyperref"){    # internal
+	          $texstr .= "\\hyperref[$a_href]{$a_encl}";    
+	       }elsif($a_type eq "hyperlink"){   # internal
+		  if($a_encl eq ""){ # Create an internal target
+	             $texstr .= "\\hypertarget{$a_href}{$a_encl}"; 
+		  }else{ # Create a link
+	             $texstr .= "\\hyperlink{$a_href}{$a_encl}"; 
+		  }
+	       }elsif($a_type eq "named"){       # internal
+	          $a_nref = "$tex:$a_nref";
+	             $texstr .= "\\hypertarget{$a_nref}{$a_encl}"; 
+		  #if($a_encl eq ""){ # Create an internal target
+	          #   $texstr .= "\\hypertarget{$a_nref}{$a_encl}"; 
+		  #}else{ # Create a link
+	          #   $texstr .= "\\hyperlink{$a_nref}{$a_encl}"; 
+		  #}
+	       }else{ print "ERROR: undefined Anchor Type\"$a_type\"\n" }
+	       $a_type=""; $a_encl=""; $strref=\$texstr;
+	    }
+	 }
+      }elsif($ttype eq "D") {   # declaration?
+         my $text = @{ $token }; #print "DECLARATION=$text\n";
+         #print "D  RAWTXT=$text\n";
+      }
+      #print "TEXSTR=\n$texstr\n";
+   } # endof while (my $token = $p->get_token)
+   undef $html; # no more raw html
+   undef $tp;   # destroy the HTML::TokeParser object (don't need it no more)
+   #print "TEXSTR=$texstr\n";
+   $texstr .= "\n";
+   return $texstr;
+}
+sub print_messages_list()
+{
+   my $tree = $_[0];
+   my $file = $_[1];
+   my $base = $file; $base =~ s/.tex//;
+   my $texdir = "$odir/tex";
+
+   #the head is in the body tag with class "head"
+   my $body=$tree->find_by_tag_name('body'); #print $body->as_HTML;
+  
+   my $head = $tree->look_down(
+                   sub{ $_[0]->tag() eq 'div' and ($_[0]->attr('class') eq "messages-list")}
+                ); #print $head->as_HTML;
+
+   my $msglist = &parse_html($head->as_HTML, $file);
+
+   $msglist =~ s/\\begin\{itemize\}/\\begin{itemize}\[noitemsep,parsep=0pt,partopsep=0pt,labelindent=\\parindent,leftmargin=0pt\]/g;
+   $msglist =~ s/\\begin\{enumerate\}/\\begin{enumerate}\[noitemsep,parsep=0pt,partopsep=0pt,labelindent=\\parindent,leftmargin=0pt\]/g;
+
+   open(FILE, ">>$texdir/$file") or die("Error opening $texdir/$file\n");
+   print FILE "$msglist\n\n\\vfill\n";
+   close(FILE);
+   return 1;
+} #PRINTMESSAGESLIST
+sub print_mail_msg()
+{
+   my $tree = $_[0];
+   my $file = $_[1];
+   my $base = $file; $base =~ s/.tex//;
+   my $texdir = "$odir/tex";
+   my $cmd;
+   my $pdfname;
+   my $s="";
+
+   #the head is in the body tag with class "head"
+   #my $body=$tree->find_by_tag_name('body'); #print "BODY\n".$body->as_HTML."\n";
+   #my $address = $tree->look_down(
+   #                sub{ $_[0]->tag() eq 'address' and ($_[0]->attr('class') eq "headers")}
+   #             ); #print $address->as_HTML; #print Dumper($address) . "\n";
+   #my $head = $tree->look_down(
+   #                sub{ $_[0]->tag() eq 'div' and ($_[0]->attr('class') eq "mail")}
+   #             ); #print "HEAD\n".$head->as_HTML."\n";
+   #$head = $head->as_HTML; print "HEAD\n".$head."\n\\HEAD\n";
+
+   my $filename =  $odir . "/" . $file; $filename =~ s/.tex$/.html/; #print "FILENAME = $filename";
+   open my $fh, '<', "$filename" or die "error opening filename: $!";
+   my $body = do { local $/; <$fh> };
+   close($fh);
+
+   my $start = '<!-- body="start" -->';
+   my $end   = '<!-- body="end" -->';
+   #$mailmsg =~ m/$pattern/; $mailmsg = $';
+   
+   $body =~ s/^.*($start.*$end).*$/$1/s; #print "BODY=\n$body\nENDBODY\n";
+   my $email = "\\noindent\n" . &parse_html($body, $file); 
+
+   $email =~ s/^$//g;             # Remove blank lines
+   $email =~ s/\\\\ +\\\\/\\\\/g; # No line here to end
+   $email =~ s/\n\\\\/\\\\\n/gs;  # No line here to end
+   $email =~ s/ *\\\\\n *\n/\\\\\n/gs;
+
+   $email =~ s/(\\textbf\{Received.+\n)/\n\n\\begin{samepage}\n\\condbreak{1.5in}\\phantom{}\\vfill\n\\hfill $1/;
+
+   $email =~ s/\\begin\{itemize\}\n+/\\begin{itemize}\n/gs;
+   $email =~ s/\\end\{itemize\}\n+\\begin\{itemize\}//gs;
+   #$email =~ s/(\\item .*)\n+(\\item .*)/$1\n$2/gs;
+   #print $email;
+   $email =~ s/\\begin\{itemize\}\n/\\begin{itemize}\[noitemsep,parsep=0pt,partopsep=0pt,labelindent=\\parindent,leftmargin=0pt\]\n/gs;
+
+   # Process attachments
+   my @lines = split(/\n/, $email);
+   my @outlines=();
+   my @attachments=(); # ARRAY OF HASHES with keys mimetype, filename
+   my ($mimetype, $link, $href, $henc);
+
+   #print '>>> SIZE of @attachments: ', scalar @attachments; print "\n"; #gives 0 !!!
+
+   foreach my $line (@lines){ #print "LINE $line\n"; 
+      if( ($line =~ m/\\item/) && ($line =~ m/attachment:/i) ){
+            #print ">> ATTACHMENT LINE $line\n"; 
+         $line =~ m/\\item\s+(\S+)\s+attachment:\s+(.*)/;
+	 $mimetype = $1; $link = $2;
+	    #print ">> ATTACHMENT TYPE=$mimetype\nLINK=$link\n";
+
+	 $link =~ m/\\hyperref\[(.*)\]\{(.*)\}/;
+	 $href = $1; $henc = $2;
+	    #print ">> ATTACHMENT HREF=$href\nHENC=$henc\n";
+
+	 my $suffix = ""; my $pathname="";
+	 my $path     = `dirname  $href`;      $path     =~ s/\n$//;
+	 my $filename = `basename $href`;      $filename =~ s/\n$//;
+	 my $basename = `basename $href .pdf`; $basename =~ s/\n$//;
+	 print ">> PATH=$path\nFILENAME=$filename\nBASENAME=$basename\n";
+
+	 my $alt_mimetype = `mimetype -b $odir/$path/$filename`; $alt_mimetype =~ s/\n$//;
+	 my $file_mimetype = `file -i $odir/$path/$filename`;   $file_mimetype =~ s/\n$//;
+	 print ">> ATTACHMENT alt_mimetype=\"$alt_mimetype\" \n";
+	 print ">> ATTACHMENT file_mimetype=\"$file_mimetype\" \n";
+
+	 # ATTACHMENT FILENAME FIX #
+	 #print "ATTACHMENT FILENAME FIX \"$filename\" -> \"$s\"\n";
+
+	 my %attachment=("mimetype" => $mimetype, "filename" => $href);
+	 if( $mimetype     eq "application/pdf" ){
+	    #print "ATTACHMENT: pushing mimetype=\"$mimetype\", filename=\"$href\"\n"; 
+	    #push (@attachments, {%attachment}); # By cloning
+            #print '>>> SIZE of @attachments: ', scalar @attachments; print " BEFORE PUSH\n";
+	    push (@attachments, \%attachment); # By reference
+	    #print Dumper(\@attachments)."\n";
+            #print '>>> SIZE of @attachments: ', scalar @attachments; print " AFTER PUSH\n";
+	 }elsif( $mimetype eq "application/octet-stream" ){
+	    if( $alt_mimetype eq "application/pdf" ){ #goto ATT;
+	       %attachment=("mimetype" => $alt_mimetype, "filename" => $href);
+	       push (@attachments, \%attachment);
+	       print "MIMETYPE=$mimetype, ALT_MIMETYPE=$alt_mimetype, FILENAME=$href\n";
+	    }elsif( $alt_mimetype eq "image/tiff" ){ #goto ATT;
+	       #my $ext = $filename; #$ext =~ /\.[^\.]*$/;
+
+	       ($basename, $pathname, $suffix ) = fileparse($filename,qr"\..[^.]*$");
+	       print "TIFF: FILENAME=$filename\n" ;
+	       print "TIFF: BASENAME=$basename\n" ;
+	       print "TIFF: PATHNAME=$pathname\n" ;
+	       print "TIFF: SUFFIX=$suffix\n" ;
+	       print "MIMETYPE=$mimetype, ALT_MIMETYPE=$alt_mimetype, FILENAME=$href, BASENAME=$basename\n";
+
+	       $cmd = "tiff2pdf -z -o $odir/$path/$basename.pdf $odir/$path/$filename";
+	       system($cmd); if($? == -1){
+                  print "tiff2pdf: Unable to convert tiff file to pdf:\n\"$cmd\" failed: $!\n";
+	       }else{
+	          %attachment=("mimetype" => "application/pdf", "filename" => "$path/$basename.pdf");
+		  $s=&latex_escape("$basename.pdf");
+		  $line = "\\item application/pdf attachment: \\hyperref[$path/$basename.pdf]{$s} ";
+	          push (@attachments, \%attachment);
+	       }
+	    }else{
+	       print "TODO: need to handle mimetype=\"$mimetype\"\n"; 
+	       print "HREF=$href\nPATH=$path\nFILENAME=$filename\nBASENAME=$basename\n";
+	       goto ATT;
+	    }
+	 }elsif( $file_mimetype eq "application/msword" ){# .rtf .doc .docx
+	    $cmd = "libreoffice -headless -convert-to pdf $odir/$path/$filename";
+	    system($cmd); if($? == -1){
+               print "libreoffice: Unable to convert msword file to pdf:\n\"$cmd\" failed: $!\n";
+	    }else{
+	       %attachment=("mimetype" => "application/pdf", "filename" => "$path/$basename.pdf");
+	       $s=&latex_escape("$basename.pdf");
+	       $line = "\\item application/pdf attachment: \\hyperref[$path/$basename.pdf]{$s} ";
+	       push (@attachments, \%attachment);
+	    }
+	 }elsif( $file_mimetype eq "image/gif" ){# .gif
+	    $cmd = "gif2png -O $odir/$path/$filename";
+	    system($cmd); if($? == -1){
+               print "gif2png unable to convert gif to png:\n\"$cmd\" failed: $!\n";
+	    }else{
+	       $cmd = "optipng $odir/$path/$filename.png";
+	       system($cmd); if($? == -1){
+                  print "optipng failed to optimize:\n\"$cmd\" failed: $!\n";
+	       }else{
+	          $mimetype      = "image/x-apple-ios-png";
+	          $file_mimetype = "image/x-apple-ios-png";
+	          goto ATT;
+	       }
+	    }
+	 }else{ # rewrite line 
+	    ATT:
+	    $line = "\\label{$href} \\item $mimetype ";
+	    my $filesize = `ls -l $odir/$path/$filename |tr -s ' '|cut -d  ' ' -f5`; $filesize =~ s/\n$//;
+	    my $modtime = `stat -c "%y" $odir/$path/$filename`; $modtime =~ s/\n$//;
+	    #
+	    # Adobe Acrobat Reader does not allow opening/saving files of type .exe, .zip, or .js
+	    # so even though we can attach such files in this pdf, we cannot open/save them!
+	    # So let's work around this problem by creating a symlink with extension .txt
+	    #
+	    print "MIMETYPE=$mimetype\n";
+	    if( ($mimetype eq "application/zip") ||
+	        ($mimetype eq "application/x-ms-dos-executable") ||
+		($mimetype eq "application/javascript")
+	      ){
+	       $mimetype="text/plain";
+               $cmd="ln -sf $filename $odir/$path/$filename.txt";
+               print "Re-naming attachment: \"$cmd\"\n";
+               system($cmd); if($? == -1){print "command \"$cmd\" failed: $!\n"; exit;}
+	       $line .= "\\attachfile[mimetype=$mimetype, size=$filesize, modified=$modtime]{ATTDIR/$path/$filename.txt} ";
+	    }elsif( $mimetype eq "image/x-apple-ios-png" ){ #image/gif
+	       $line .= "\\includegraphics[width=1in]{ATTDIR/$path/$filename.png} ";
+	    }else{
+	       $line .= "\\attachfile[mimetype=$mimetype, size=$filesize, modified=$modtime]{ATTDIR/$path/$filename} ";
+	    }
+	    $line .= &latex_escape($filename) . "\n";
+	 }
+      }
+      push (@outlines, $line);
+   }
+
+
+   open(FILE, ">>$texdir/$file") or die("Error opening $texdir/$file\n");
+   foreach (@outlines){
+      print FILE "$_\n";
+   }
+   &print_foot($tree, $file);
+   open(FILE, ">>$texdir/$file") or die("Error opening $texdir/$file\n");
+   print FILE "\\end{samepage}\n";
+
+   print '>>> SIZE of @attachments PDF ATTACHMENTS: ', scalar @attachments; print "\n";
+   foreach my $attachment (@attachments){
+      my $mimetype = $attachment->{"mimetype"};
+      my $filename = $attachment->{"filename"};
+      print ">>> mimetype=<$mimetype>; attachment=\"$filename\"\n"; 
+
+      my $path = `dirname  $filename`;       $path =~ s/\n$//;
+      my $file = `basename $filename`;       $file =~ s/\n$//;
+      my $base = `basename $filename .pdf`;  $base =~ s/\n$//;
+
+      #print FILE "\\pagebreak \\phantomsection \\label{$filename}\n";
+      print "PDF ODIR=$odir\n";
+      print "PDF PATH=$path\n";
+      print "PDF BASE=$base\n";
+      print "PDF FILENAME=$file\n";
+
+      if(!&fixpdf("$odir/$path/$file")){
+	 $PDFOPT=FALSE;
+	 print FILE "Unable to fix broken pdf: \"$odir/$path/$file\"\n";
+      }else{
+         $cmd="pdfinfo $odir/$path/$file | tr -cd '\11\12\15\40-\176' "; system($cmd);
+	 if($? == -1){ 
+	    print "ERROR executing $cmd\n";
+	 }elsif($? == 256){
+	    print "ERROR executing $cmd\nIs file encrypted?\n";
+	 }else{
+	    # use command 'tr' to remove garbage binary characters from pdf meta info
+            my $npages = `pdfinfo $odir/$path/$file | tr -cd '\11\12\15\40-\176' | grep -i pages|tr -s ' '|cut -d ' ' -f 2`; $npages =~ s/\n$//;
+            if($npages ne ""){
+               print FILE "\\pagebreak \\phantomsection \\label{$filename}\n";
+	       # includepdf cannot handle filenames with more than one period, e.g. file.1.pdf
+	       # so we make a copy instead (LaTeX doesn't handle ../path/symlink )
+	       $pdfname=`mktemp --tmpdir=$odir/$path --suffix=.pdf tmp_XXX`;
+               if($? == -1){
+                  print "Unable to create temporary filename: \"$cmd\" failed: $!\n";
+               }else{
+	          $cmd="cp $odir/$path/$file $pdfname"; system($cmd); 
+	          if($? == -1){
+                     print "Unable to make a copy of pdf: \"$cmd\" failed: $!\n";
+                  }else{
+		     $pdfname=`basename $pdfname`; $pdfname =~ s/\n$//;
+		     if($?==-1){ print "basename $pdfname FAILED!\n";
+		        print FILE "\%";
+		     }
+		     print ">>> INCLUDING $npages PDF pages\n";
+                     for(my $i=1; $i<=$npages; $i++){
+                        print FILE "\\includepdf[pages=$i, noautoscale=false, fitpaper=true]" .  "{ATTDIR/$path/$pdfname}\n";
+		        }
+		     }
+               }
+            }else{
+               #my $pdfinfo = `pdfinfo $odir/$path/$file`; $pdfinfo =~ s/\n$//;
+               print "ERROR: pdfinfo $odir/$path/$file\n";
+            }
+         }
+      }
+   }
+   close(FILE);
+   return 1;
+} #PRINTMAILMSG
+sub print_bodyhead()
+{
+   my $tree = $_[0];
+   my $file = $_[1];
+   my $reflab = $_[2];
+   my $base = $file; $base =~ s/.tex//;
+   my $texdir = "$odir/tex";
+
+   #the head is in the body tag with class "head"
+   my $body=$tree->find_by_tag_name('body'); #print $body->as_HTML;
+  
+   my $head = $tree->look_down(
+                   sub{ $_[0]->tag() eq 'div' and ($_[0]->attr('class') eq "head")}
+                ); #print $head->as_HTML;
+
+   my $pagetitle = $tree->look_down( '_tag' , 'title' ); $pagetitle = &latex_escape($pagetitle->as_text);
+   my $titlehead = $tree->look_down('_tag', 'h1');       $titlehead = &latex_escape($titlehead->as_text);
+
+   my $navbar = $head->look_down("id", "navbar");     
+      #print "$file\n" . $navbar->as_HTML ."\n";
+   my $header = &parse_html($navbar->as_HTML, $file); 
+      #print "HEADER\n$header\n\n"; 
+
+   $header =~ s/\\begin\{itemize\}/\\begin{itemize}\[label=,noitemsep,parsep=0pt,partopsep=0pt,labelindent=\\parindent,leftmargin=0pt\]/g;
+   $header =~ s/\\begin\{enumerate\}/\\begin{enumerate}\[noitemsep,parsep=0pt,partopsep=0pt,labelindent=\\parindent,leftmargin=0pt\]/g;
+   $header =~ s/^$//g; # Remove blank lines
+
+   open(FILE, ">>$texdir/$file") or die("Error opening $texdir/$file\n");
+   print FILE "\\begin{center}\\Large $titlehead \\end{center}\n";
+   print FILE "\\hrule\n";
+   print FILE "\\phantomsection \\hypertarget{$base.tex:$reflab}{}$header\n\n";
+   close(FILE);
+   return 1;
+} #ENDPRINTBODYHEAD
+sub print_foot()
+{
+   my $tree = $_[0];
+   my $file = $_[1];
+   my $base = $file; $base =~ s/.tex//;
+   my $texdir = "$odir/tex";
+
+   open(FILE, ">>$texdir/$file") or die("Error opening $texdir/$file\n");
+
+   #my $head = $tree->find_by_tag_name('head');
+   #print FILE "\\begin{comment}\n" . $head->as_HTML . "\\end{comment}\\n";
+
+   # HEAD NAVBAR
+   #print FILE "\% HEAD NAVBAR\n\\vfill \\begin{center}\n\\hrule \\vspace{5pt}\n";
+   #&print_bracket($list->as_HTML, $file);
+   #my $head   = $tree->look_down(sub{ $_[0]->tag() eq "div" and ($_[0]->attr('class') eq "head")});
+   #my $navbar = $head->look_down(sub{ $_[0]->tag() eq "map" and ($_[0]->attr('id') eq "navbar")});
+   #my $nav    = $navbar->look_down("_tag", "ul");
+   #my $list   = $nav->look_down("_tag", "li"); 
+   #$navbar = &parse_html($navbar->as_HTML, $file);
+   #print FILE "$navbar\n";
+   #print FILE "\\end{center}\n";
+
+   # FOOT NAVBAR
+   print FILE "\% FOOT NAVBAR\n\\begin{center}\n\\hrule \\vspace{5pt}\n";
+   # The file attachments are in a <div> with no class attribute
+   # The navbarfoot is in <div class="foot">
+   my $foot   = $tree->look_down(
+                   sub{ $_[0]->tag() eq "div" and 
+		        defined $_[0]->attr('class') and ($_[0]->attr('class') eq "foot")
+		   }
+                );
+
+   my $navbarfoot = $foot->look_down(sub{ $_[0]->tag() eq "map" and ($_[0]->attr('id') eq "navbarfoot")});
+   #print "FOOTER NAVBAR= " . $navbarfoot->as_HTML . "\n";
+   $navbarfoot = &parse_html($navbarfoot->as_HTML, $file);
+   $navbarfoot =~ s/\\begin\{itemize\}/\\begin{itemize}\[label=,noitemsep,parsep=0pt,partopsep=0pt,labelindent=\\parindent,leftmargin=0pt\]/g;
+   print FILE "\\hypertarget{$base.tex:end}{}\n$navbarfoot\n";
+
+   # FOOTNOTE
+   #my $footnote = $tree->as_HTML; 
+   #my $footnote = $tree->look_down('_tag', "body");
+   my $filename =  $odir . "/" . $file; $filename =~ s/.tex$/.html/; #print "FILENAME = $filename";
+   open my $fh, '<', "$filename" or die "error opening filename: $!";
+   my $footnote = do { local $/; <$fh> };
+
+   my $pattern = '<!-- trailer="footer" -->';
+   $footnote =~ m/$pattern/; $footnote = $';
+   $footnote = &parse_html($footnote, $file);
+   print FILE "\% FOOTNOTE\n";
+   print FILE $footnote;
+   print FILE "\\end{center}\n";
+
+   close($fh);
+   close(FILE);
+}  #ENDPRINTFOOT
+sub parse_message()
+{
+   my $path = $_[0]; #print "PATH=$path\n";
+   my $html = $_[1]; #print "HTML=$html\n";
+   #print "\n\n\n\n>>>parse_message: PATH=$path FILE=$html\n";
+
+   #my $tree = HTML::TreeBuilder->new_from_content($html);
+   #my $tree = HTML::TreeBuilder->new_from_file("$path/$html");
+   my $tree = HTML::TreeBuilder->new();
+
+   $tree->ignore_ignorable_whitespace(0); # Don't try to delete whitespace between block-level elements.
+   $tree->no_space_compacting(1);         # Don't smash every whitespace sequences into a single space.
+   #$tree->no_expand_entities(FALSE);
+   $tree->store_comments(TRUE);
+   #print "PATH/FILE=$path/$html\n";
+   $tree = $tree->parse_file("$path/$html");
+
+   #$tree->dump; 
+   #print $tree->as_HTML;
+   #print $tree->all_attr();
+
+   my $texfile = $html; $texfile =~ s/.html/.tex/;
+
+   &print_head($tree, $texfile);
+   &print_bodyhead($tree, $texfile, "start");
+   &print_mail_msg($tree, $texfile);
+   #&print_foot($tree, $texfile);
+
+   $tree->delete;
+   return 1;
+}#PARSEMESSAGE
+sub parse_index()
+{
+   my $path = $_[0]; #print "PATH=$path\n";
+   my $html = $_[1]; #print "HTML=$html\n";
+
+   #my $tree = HTML::TreeBuilder->new_from_content($html);
+   my $tree = HTML::TreeBuilder->new_from_file("$path/$html");
+
+   #$tree->dump; 
+   #print $tree->as_HTML;
+   #print $tree->all_attr();
+
+   $tree->ignore_ignorable_whitespace(0);
+     # Don't try to delete whitespace between block-level elements.
+   $tree->no_space_compacting(1);
+     # Don't smash every whitespace sequences into a single space.
+   #print $tree->as_HTML;
+
+   my $texfile = $html; $texfile =~ s/.html/.tex/;
+
+   &print_head($tree, $texfile);
+   &print_bodyhead($tree, $texfile, "first");
+   &print_messages_list($tree, $texfile);
+   &print_foot($tree, $texfile);
+
+   $tree->delete;
+   return 1;
+}#PARSEINDEX
+
+sub latex_escape()
+{
+    my $s = shift;
+  
+    # Replace a \ with $\backslash$
+    # This is made more complicated because the dollars will be escaped
+    # by the subsequent replacement. Easiest to add \backslash
+    # now and then add the dollars
+    $s =~ s/\\/\\backslash/g;
+
+    # remove  carriage returns
+    $s =~ s/\r\n?/\n/g; $s =~ s/\r//g;
+    # change %20 to space
+    $s =~ s/%20/ /g;
+
+    #
+    # First we replace all html codes for which there is a latex code of the form \CODE
+    # http://www.tedmontgomery.com/tutorial/htmlchrc.html
+    #
+    $s =~ s/&trade;/\\textrademark/g;
+    $s =~ s/&reg;/\\textregistered/g;
+    $s =~ s/&copy;/\\textcopyright/g;
+
+    $s =~ s/&#8224;/\\textdagger/g;
+    $s =~ s/&#8225;/\\textdoubledagger/g;
+    $s =~ s/&#146;|&#8226;|&bull;/\\textbullet/g;
+
+    $s =~ s/&ndash;/--/g; $s =~ s/&mdash;/---/g;
+
+    $s =~ s/&#39;/\'/g; # apostraphe
+
+
+    # Hack to fix special case of nested quotes
+    if($s =~ m/HylaFAX Agent: &quot;Fax received from &quot;([\d\s]+)&quot;&quot;/ ){ 
+       #print "QUOT $s\n"; 
+       $s = "HylaFAX Agent: ``Fax received from `$1'\\,''";
+       #print "FIX: $s\n"; 
+    }
+    # Quotation marks: eg "FAX recevied from &quot;123-4567&quot; "
+    # Do double-quotes " first
+    my $quote="\`\`"; while ( $s =~ s/(\")/$quote/ ){
+       if($quote eq "\'\'"){ $quote="\`\`";
+       }else{ $quote="\'\'"; }
+    }
+    # Then do &quot;
+       $quote="\`\`"; while ( $s =~ s/(&quot;)/$quote/ ){
+       if($quote eq "\'\'"){ $quote="\`\`";
+       }else{ $quote="\'\'"; }
+    }
+    $s =~ s/&#147;|&#8220;|&ldquo;/\`\`/g;    $s =~ s/&#148;|&#8221;|&rdquo;/\"/g;
+    $s =~ s/&#145;|&#8216;|&lsquo;/\`/g;      $s =~ s/&#146;|&#8217;|&rsquo;/\'/g;
+
+  
+    # Now we escape the special ASCII chars (all but the backslash)
+    # Must be done after escape of \ since this command adds latex escapes
+    # Replace characters that can be escaped
+    $s =~ s/([\$\#&%_{}])/\\$1/g;
+
+    #
+    # Next we replace html &code; 
+    #
+    $s =~ s/\\&amp;/\\&/g;
+    $s =~ s/\\&gt;/>/g;
+    $s =~ s/\\&lt;/</g;
+    # Umlauts
+    $s =~ s/&(a|A|e|E|i|I|o|O|u|U)uml;/\"{$1}/g;
+
+    # Greater and Less Symbols
+    $s =~ s/< */\\textless\\,/g;
+    $s =~ s/> */\\textgreater\\,/g;
+  
+    # Replace ^ characters with \^{} so that $^F works okay
+    $s =~ s/(\^)/\\$1\{\}/g;
+  
+    # Replace tilde (~) with \texttt{\~{}}
+    #$s =~ s/~/\\texttt\{\\~\{\}\}/g;
+    $s =~ s/~/\\textasciitilde\{\}/g;
+
+    # Replace nonbreaking white space with ~
+    $s =~ s/\\&nbsp;/~/g;
+  
+    # Now add the dollars around each \backslash
+    $s =~ s/(\\backslash)/\$$1\$/g;
+    return $s;
+}
+sub try_pdftops()
+{
+    my $s = shift;
+    my $path = `dirname  $s`;       $path =~ s/\n$//;
+    my $file = `basename $s`;       $file =~ s/\n$//;
+    my $base = `basename $s .pdf`;  $base =~ s/\n$//;
+
+    # Sometimes ghostscript's pdfopt fails unless we first do the following:
+    # pdftops -r 300 -origpagesizes $path/$base.repaired $path/$base.ps
+    # ps2pdf14 $path/$base.ps $path/$base.repaired
+    $cmd="pdftops -r 300 -origpagesizes $s $path/$base.ps";
+    system($cmd);
+    if($? == -1){
+          print "\"$cmd\" failed with error: $!\n";  return 0;
+    }else{
+          $cmd="ps2pdf14 $path/$base.ps $path/$base.repaired";
+	  system($cmd);
+	  if($? == -1){
+             print "\"$cmd\" failed with error: $!\n";  return 0;
+	  }
+    }
+    return 1;
+}
+
+# system("command", "arg1", "arg2", "arg3");
+# The return value is set in $?; 
+# this value is the exit status of the command as returned by the 'wait' call; 
+# to get the real exit status of the command you have to shift right by 8 the value of $? ($? >> 8).
+# If the value of $? is -1, then the command failed to execute, 
+# in that case you may check the value of $! for the reason of the failure.
+sub fixpdf($)
+{
+    my $s = shift;
+
+    my $path = `dirname  $s`;       $path =~ s/\n$//;
+    my $file = `basename $s`;       $file =~ s/\n$//;
+    my $base = `basename $s .pdf`;  $base =~ s/\n$//;
+
+    print "fixpdf(): Linearizing PDF \"$s\"\n";
+
+    my $cmd="cp $s $s.orig"; system($cmd); if($? == -1){
+       print "Unable to make copy of $s with \"$cmd\" failed: $!\n"; goto PDFERROR;
+    }
+
+    # Linearize pdf using qpdf and pdfopt and finally qpdf
+    $cmd="qpdf --linearize $s $path/$base.lin"; system($cmd); 
+    if($? == -1){ 
+       print "\"$cmd\" failed with error: $!\n"; 
+    }else{ #printf "\"$cmd\" exited with value %d\n", $? >> 8;
+       $cmd="mv $path/$base.lin $path/$base.opt"; system($cmd); 
+       if($? == -1){
+          print "\"$cmd\" failed with error: $!\n"; 
+       }else{
+          goto PDFSUCCESS;
+       }
+    }
+
+
+    $cmd="pdftk $s output $path/$base.repaired";
+    system($cmd); 
+    if($? == -1){
+       print "Repair of corrupted XREF table with \"$cmd\" failed with error: $!\n"; 
+       print "Trying to repair with pdftops followed by ps2pdf14\n";
+       &try_pdftops($s) or goto PDFERROR;
+    }
+    
+    #$cmd="pdfopt $path/$base.repaired $path/$base.opt"; 
+    $cmd="qpdf --linearize $path/$base.repaired $path/$base.opt"; 
+    system($cmd); 
+    if( ($? == -1) || ($? == 256) ){
+       print "Optimization with \"$cmd\" failed with error: $!\n"; 
+       print "Trying to repair with pdftops followed by ps2pdf14\n";
+       &try_pdftops($s) or goto PDFERROR;
+       system($cmd); if($? == -1){
+          print "Unable to optimize $s\nGiving up!\n"; goto PDFERROR;
+       }
+    }
+
+    PDFSUCCESS:
+    $cmd="cp $path/$base.opt $s";
+    if($? == -1){
+       print "\"$cmd\" failed with error: $!\n"; goto PDFERROR;
+    }
+    print "FIXPDF SUCCESS!\n";
+    return 1;
+
+    PDFERROR:
+    print "FIXPDF WARNING: Unable to fix pdf attachment \"$s\"\n" .
+	  "Therefore, we will also be unable to correctly optimize any document which includes this pdf \n" .
+	  "and if we tried to do so, we would get a blank first page and a jumbled tableofcontents \n";
+    print "PLEASE TRY THE FOLLOWING:\n";
+    print "   pdftops -r 300 -paper <letter|legal> file.pdf file.ps\n";
+    print "   ps2pdf14 file.ps file-new.pdf\n";
+    print "   ROTATE IF NEEDED: pdftk A=file-new.pdf cat A1-endE output file-rot.pdf";
+    print "   qpdf --linearize file-new.pdf file.opt\n\n";
+    print "FIXPDF FAILURE!\n";
+
+    return 0;
+}#ENDPDFOPT
+# sample metadata file for use with xmpincl package
+# vi: any utf character at all can be entered with a Ctrl-V prefix, either <Ctrl-V> u aaaa 
+#     or <Ctrl-V> U bbbbbbbb, with 0 <= aaaa <= FFFF, or 0 <= bbbbbbbb <= 7FFFFFFF. 
+sub sample_metadata
+{
+   open FILE, ">$odir/tex/metadata_sample.xmp" or die $!;
+   print TEXFILE <<'EOF';
+(∗license)
+<x:xmpmeta xmlns:x=’adobe:ns:meta/’>
+   <rdf:RDF xmlns="http://web.resource.org/cc/"
+            xmlns:dc="http://purl.org/dc/elements/1.1/"
+            xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+            <Work rdf:about="">
+               <dc:title>xmpincl</dc:title>
+               <dc:date>2005</dc:date>
+               <dc:description>
+                  A LaTeX package to include XMP metadata in
+                  files generated through pdfLaTeX
+               </dc:description>
+               <dc:creator>
+                  <Agent><dc:title>Maarten Sneep</dc:title></Agent>
+               </dc:creator>
+               <dc:rights>
+                  <Agent><dc:title>Maarten Sneep</dc:title></Agent>
+               </dc:rights>
+               <dc:source
+                  rdf:resource="ftp://ftp.tex.ac.uk/tex&#45;archive/macros/latex/contrib/xmpincl.tar.100
+              <license rdf:resource="http://creativecommons.org/licenses/GPL/2.0/" />
+            </Work>
+            <License rdf:about="http://creativecommons.org/licenses/GPL/2.0/">
+               <permits rdf:resource="http://web.resource.org/cc/Reproduction" />
+               <permits rdf:resource="http://web.resource.org/cc/Distribution" />
+               <requires rdf:resource="http://web.resource.org/cc/Notice" />
+               <permits rdf:resource="http://web.resource.org/cc/DerivativeWorks" />
+               <requires rdf:resource="http://web.resource.org/cc/ShareAlike" />
+               <requires rdf:resource="http://web.resource.org/cc/SourceCode" />
+            </License>
+         </rdf:RDF>
+</x:xmpmeta>
+(/license)
+EOF
+}
+#        BUGS: Probably. Hypermail has bugs especially with certain html email message parts
+#                        arising from forwarded and reply-to messages.
+#              09/13/11 -- in email addresses removed space after < foo@bar> ,
+#              09/15/11 -- German umlauts 
+#                          FIX UNICODE encoding issues: =FC =F6 &uuml; &ouml; 
+#                          latex_escape(): added generic umlaut \"{vowel}" encoding
+#              09/16/11 -- added alt_mimetype because some emails listed mimetype of attachments
+#                          as application/octet-stream instead of application/pdf
+#              09/19/11 -- added sub pdfopt() to:
+#                             repair corrupted XREF tables using pdftk
+#                             optimize using pdfopt
+#              09/30/11 -- FIXED bug regarding emails in html format.
+#                             tree->find_by_tag_name() and tree->look_down() would put html email
+#                             in next node which my code didn't traverse. 
+#                             So instead I changed the code to find the hypermail comments:
+#                             <! -- body="start" --> and <! -- body="end" --> tags
+#                             Also fixed typo (missing &) in call to pdfopt in MAIN
+#              10/17/11 -- FIXED tabchar \t and hexcode \xA0 in emails
+#                          FIXED pdfpages issue with filenames containing 2 periods, e.g. file.1.pdf
+#              11/02/11 -- FIXED system($cmd) issue with $cmd containing ';' sh -c 'command'
+#              11/09/11 -- FIXED pdfname bug (moved outside of loop over pages)
+#                          FIXED unicode BOM (Byte Order Marker problem) 
+#                          \xEF\xBB\xBF <feff>  =EF=BB=BF
+#                          use libreoffice to convert msword attachments to pdf
+#                          modified fixpdf() to automatically try fixing broken pdf files
+#                             using pdftops and ps2pdf
+#                             
+#                          UNFIXED: I've also notice a few cases where hypermail appeared to incorrectly
+#                          parse Email.mbox when mail msg contains an attachment -- some huge ps/pdf
+#                          attachments got duplicated/appended to wrong mail msg, e.g. a msg like
+#                          www/0018.html contained raw ps/pdf. I noticed these incorrect html files
+#                          by their huge size (~27M) and so I manually deleted the raw ps/pdf, then
+#                          re-ran mbox2pdf to re-process the html messages to tex. 
+#                          This was a Kmail Maildir Archive which was converted to mbox format
+#                          with xfmail2mbox.sh so the problem could also be with xfmail2mbox.sh
+#
+#             11/23/11 -- REPLACED pdfopt from ghostscript-gpl with qpdf
+#                            qpdf is better able to linearize pdf's which pdfopt chokes on
+#                            qpdf also produces smaller linearized pdf's and has a lot more functions
+#                                 e.g. see "qpdf --help"
+#             12/02/11 -- More char codes dagger, doubledagger, bullet, apostrophe
+#             10/22/12 -- As a security precaution, Adobe Acrobat does not allow opening/saving 
+#                         files of type .exe, .zip or .js
+#                         even though it does allow attaching such files in a pdf
+#                         So if we email somebody a zipfile as an attachment, mbox2pdf can embed the
+#                         zipfile as an attachment, but Acrobat won't allow its opening or saving.
+#                         So we work around the issue by creating a symlink of extension .txt
+#                         Now Acrobat will ask if you want to save the file or choose an application to open it
+#
+#
+#             06/17/13 -- hypermail doesn't properly handle RFC1738 (CID and MID URL's)
+#                         which are html url internal targets within the email, typically
+#                         company logos, etc. Since mbox2pdf translates hypermail's html pages to tex,
+#                         it doesn't handle CID and MID links correctly either.
+#
+#             07/24/13 -- added sub fix_xml() to properly excape literal '&' characters
+#                         added code to convert .gif images into .png to work with LaTeX \includegraphics
+#             07/25/13 -- added code for symlinks and relative paths
+#                         Sometimes it's useful to include HyperEmail.pdf into another latex document
+#                         but pdfannotextractor breaks if there are file attachments. So I want to be able
+#                         to \input this latex code into another latex document. The import package 
+#                         is supposed to help do this, but \includegraphics (and \pdfpages)
+#                         doesn't properly expand macros (does only one step of expansion for its argument)
+#                         We could try a work around like this:
+#                                \newcommand{\MyFigure}{%
+#                                \begin{figure}
+#                                \centering
+#                                \edef\tmp{\noexpand\includegraphics[width=0.5\linewidth]{\currentimage}}\tmp
+#                                \end{figure}}
+#                         But I decided to just create symlinks for the parent directory containing all the
+#                         att-???? attachment directories and also a symlink for the toplevel TEXDIR from
+#                         which pdflatex is run (used by \input{} in INPUTS.tex (a MACRO works here also)
+#                         So, to include HyperEmail.tex into another latex document
+#                         just create two symlinks TEXDIR and ATTDIR.
+#                         TEXDIR should point to the directory containing INPUTS.tex, and
+#                         ATTDIR should point to the parent directory containing the attachment directories
+#                         Then in your main latex document, just \subimport{TEXDIR/}{INPUTS.tex}
+#
+#             12/31/13 -- fixed path issues which broke running pdflatex in previous version
+#                         removed optimization with pdfopt as no longer provided by ghostscript-gpl
+#             05/02/14 -- FIXED BUG: \href{mailto:person@domain.com \texttt{\~{}}{display text}
+#                         replaced \textt{~{}} with \textasciitilde{}
+#                         Added support for gif attachments (icons, logos, etc) by
+#                         converting them to png and including as graphics \includegraphics[width=1in]{x.png}
+#             04/08/16 -- Added support for latex package subfile and including preamble.tex
+#             04/12/17 -- fixed BUG to handle binary garbage in pdf meta info 
+#                         so that we can correctly grep for 'Pages' using ASCII output of pdfinfo
+#        ENDBUGS
